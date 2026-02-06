@@ -1,0 +1,23 @@
+[package]
+name = "kooforge"
+version = "0.1.0"
+edition = "2021"
+description = "Fast interactive IPFS/IPNS Peer ID vanity generator"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/LeUKi/kooforge"
+homepage = "https://github.com/LeUKi/kooforge"
+keywords = ["ipfs", "libp2p", "peerid", "vanity", "ed25519"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1"
+bs58 = "0.5"
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+libp2p-identity = { version = "0.2.13", features = ["peerid", "ed25519"] }
+memchr = "2"
+num_cpus = "1"
+time = { version = "0.3", features = ["macros", "formatting"] }
+rand = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+dialoguer = "0.11"
