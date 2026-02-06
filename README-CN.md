@@ -26,13 +26,13 @@
 ## 快速开始
 ```
 # 交互模式：逐步选择匹配模式/线程数/是否导出等
-kooforge --interactive
+kooforge
 
 # 前缀匹配（命中 1 个后退出）
 kooforge 12 --mode prefix --limit 1
 
-# 任意子串匹配（大小写不敏感、8 线程）
-kooforge KoOw --mode any --case-insensitive --threads 8
+# 任意子串匹配（默认大小写不敏感，8 线程）
+kooforge KoOw --mode any --threads 8
 
 # 导出为 go-ipfs keystore（文件名为 dupa）
 kooforge dupa --mode any --limit 1 --export-ipfs --key-name dupa
@@ -44,9 +44,10 @@ ipfs name publish --key=dupa {ipfs-path}
 - `pattern`：要匹配的 Base58 子串（交互模式下可省略）。
 - `--mode [any|prefix|suffix]`：匹配模式，默认 `any`。
 - `--threads N`：线程数，默认为 CPU 逻辑核心数。
-- `--limit N`：命中数量上限；不设置为无限。
+- `--limit N`：命中数量上限；默认 10；设置 `0` 为无限。
 - `--out DIR`：输出目录，默认 `keystore`。
-- `--case-insensitive`：大小写不敏感匹配。
+- `--case-insensitive`：大小写不敏感匹配（默认开启）。
+- `--case-sensitive`：强制大小写敏感匹配（覆盖上述设置）。
 - `--print-only`：只打印 PeerId，不写入私钥文件。
 - `--stats-interval SECS`：统计打印间隔（秒；`0` 关闭）。
 - `--export-ipfs`：使用 `--key-name` 额外落盘兼容 go-ipfs keystore。

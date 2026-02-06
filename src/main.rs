@@ -47,9 +47,13 @@ struct Args {
     #[arg(long, default_value = "keystore")]
     out: PathBuf,
 
-    /// Case-insensitive match · 大小写不敏感匹配
-    #[arg(long, default_value_t = false)]
+    /// Case-insensitive match (default: on) · 大小写不敏感匹配（默认开启）
+    #[arg(long, default_value_t = true)]
     case_insensitive: bool,
+
+    /// Force case-sensitive match (overrides above) · 强制大小写敏感匹配（覆盖上述设置）
+    #[arg(long, default_value_t = false)]
+    case_sensitive: bool,
 
     /// Print PeerId only, no private key write · 只打印 PeerId，不写入私钥
     #[arg(long, default_value_t = false)]
@@ -107,7 +111,8 @@ fn main() -> Result<()> {
     let (tx, rx) = bounded::<Hit>(1024);
 
     let pat = args.pattern.clone().expect("pattern required · 需要提供匹配子串");
-    let pattern = if args.case_insensitive { pat.to_lowercase() } else { pat.clone() };
+    let ci_eff = if args.case_sensitive { false } else { args.case_insensitive };
+    let pattern = if ci_eff { pat.to_lowercase() } else { pat.clone() };
 
     let mut workers = Vec::with_capacity(threads);
     for _ in 0..threads {
@@ -115,7 +120,7 @@ fn main() -> Result<()> {
         let pattern = pattern.clone();
         let mode = args.mode;
         let stop = Arc::clone(&stop);
-        let case_insensitive = args.case_insensitive;
+        let case_insensitive = ci_eff;
         let print_only = args.print_only;
         workers.push(thread::spawn(move || worker_loop(tx, stop, pattern, mode, case_insensitive, print_only)));
     }
@@ -127,7 +132,7 @@ fn main() -> Result<()> {
         Some(n) => Some(n),
         None => Some(10),
     };
-    aggregator(rx, &args, stop.clone(), &pat, eff_limit)?;
+    aggregator(rx, &args, stop.clone(), &pat, eff_limit, ci_eff)?;
 
     for h in workers { let _ = h.join(); }
     Ok(())
@@ -262,7 +267,7 @@ fn ends_with(hay: &str, needle: &str, ci: bool) -> bool {
     if ci { hay.to_lowercase().ends_with(&needle) } else { hay.ends_with(needle) }
 }
 
-fn aggregator(rx: Receiver<Hit>, args: &Args, stop: Arc<AtomicBool>, pat: &str, eff_limit: Option<usize>) -> Result<()> {
+fn aggregator(rx: Receiver<Hit>, args: &Args, stop: Arc<AtomicBool>, pat: &str, eff_limit: Option<usize>, ci: bool) -> Result<()> {
     let mut found = 0usize;
     let mut last_stats = OffsetDateTime::now_utc();
     let mut generated_counter: u64 = 0; // 简易估计：以命中作为可见事件，不统计总生成数（可扩展）
@@ -273,7 +278,7 @@ fn aggregator(rx: Receiver<Hit>, args: &Args, stop: Arc<AtomicBool>, pat: &str, 
             Ok(hit) => {
                 found += 1;
                 generated_counter += 1;
-                let out = if args.no_color { hit.peer_id_b58.clone() } else { highlight(&hit.peer_id_b58, pat, args.mode, args.case_insensitive) };
+                let out = if args.no_color { hit.peer_id_b58.clone() } else { highlight(&hit.peer_id_b58, pat, args.mode, ci) };
                 println!("{}", out);
                 if let Some(sk) = hit.sk_protobuf {
                     write_key(&args.out, &hit.peer_id_b58, &sk)?;

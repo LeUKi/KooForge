@@ -26,13 +26,13 @@
 ## Quick Start
 ```
 # Interactive mode: step through mode/threads/export etc.
-kooforge --interactive
+kooforge
 
 # Prefix match (stop after first hit)
 kooforge 12 --mode prefix --limit 1
 
-# Substring match (case-insensitive, 8 threads)
-kooforge KoOw --mode any --case-insensitive --threads 8
+# Substring match (default case-insensitive, 8 threads)
+kooforge KoOw --mode any --threads 8
 
 # Export as go-ipfs keystore (filename: dupa)
 kooforge dupa --mode any --limit 1 --export-ipfs --key-name dupa
@@ -44,9 +44,10 @@ ipfs name publish --key=dupa {ipfs-path}
 - `pattern`: Base58 substring to match (optional in interactive mode).
 - `--mode [any|prefix|suffix]`: matching mode; default `any`.
 - `--threads N`: number of threads; defaults to CPU logical cores.
-- `--limit N`: stop after N matches; unlimited if omitted.
+- `--limit N`: stop after N matches; default 10; set `0` for unlimited.
 - `--out DIR`: output directory; default `keystore`.
-- `--case-insensitive`: case-insensitive matching.
+- `--case-insensitive`: case-insensitive matching (default on).
+- `--case-sensitive`: force case-sensitive matching (overrides above).
 - `--print-only`: print PeerId only; do not write the private key.
 - `--stats-interval SECS`: stats print interval in seconds; `0` disables.
 - `--export-ipfs`: also write a go-ipfs compatible keystore file using `--key-name`.
