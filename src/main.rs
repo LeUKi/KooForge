@@ -2,8 +2,9 @@ use std::{
     fs::{self, File},
     io::{Write},
     path::{Path, PathBuf},
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}},
     thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -16,6 +17,7 @@ use num_cpus;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use rand::rngs::OsRng;
 use ed25519_dalek::SigningKey;
+use ctrlc;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Mode {
@@ -37,7 +39,7 @@ struct Args {
     #[arg(long)]
     threads: Option<usize>,
 
-    /// Hit limit (default: unlimited) · 命中数量上限（默认：无限）
+    /// Hit limit (default: 10; set 0 for unlimited) · 命中数量上限（默认：10；输入 0 为无限）
     #[arg(long)]
     limit: Option<usize>,
 
@@ -81,6 +83,21 @@ fn main() -> Result<()> {
     }
     let threads = args.threads.unwrap_or_else(|| num_cpus::get());
     let stop = Arc::new(AtomicBool::new(false));
+    let sig_count = Arc::new(AtomicUsize::new(0));
+
+    {
+        let stop = Arc::clone(&stop);
+        let sig_count = Arc::clone(&sig_count);
+        ctrlc::set_handler(move || {
+            let n = sig_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == 1 {
+                stop.store(true, Ordering::SeqCst);
+                eprintln!("Stopping… Press Ctrl-C again to force exit · 正在停止…再次 Ctrl-C 强制退出");
+            } else {
+                std::process::exit(130);
+            }
+        })?;
+    }
 
     if !args.print_only {
         fs::create_dir_all(&args.out)
@@ -105,7 +122,12 @@ fn main() -> Result<()> {
 
     drop(tx);
 
-    aggregator(rx, &args, stop.clone(), &pat)?;
+    let eff_limit = match args.limit {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None => Some(10),
+    };
+    aggregator(rx, &args, stop.clone(), &pat, eff_limit)?;
 
     for h in workers { let _ = h.join(); }
     Ok(())
@@ -135,10 +157,13 @@ fn interactive_args(mut base: Args) -> Result<Args> {
         .interact_text()?;
 
     let limit_str: String = Input::with_theme(&theme)
-        .with_prompt("Hit limit (empty = unlimited) · 命中数量上限 (留空为无限)")
+        .with_prompt("Hit limit (empty = default 10; 0 = unlimited) · 命中数量上限 (留空默认10；输入0为无限)")
         .allow_empty(true)
         .interact_text()?;
-    let limit = if limit_str.trim().is_empty() { None } else { Some(limit_str.trim().parse()?) };
+    let limit = if limit_str.trim().is_empty() { Some(10) } else {
+        let n: usize = limit_str.trim().parse()?;
+        if n == 0 { None } else { Some(n) }
+    };
 
     let out_default = base.out.clone();
     let out_str: String = Input::with_theme(&theme)
@@ -237,14 +262,14 @@ fn ends_with(hay: &str, needle: &str, ci: bool) -> bool {
     if ci { hay.to_lowercase().ends_with(&needle) } else { hay.ends_with(needle) }
 }
 
-fn aggregator(rx: Receiver<Hit>, args: &Args, stop: Arc<AtomicBool>, pat: &str) -> Result<()> {
+fn aggregator(rx: Receiver<Hit>, args: &Args, stop: Arc<AtomicBool>, pat: &str, eff_limit: Option<usize>) -> Result<()> {
     let mut found = 0usize;
     let mut last_stats = OffsetDateTime::now_utc();
     let mut generated_counter: u64 = 0; // 简易估计：以命中作为可见事件，不统计总生成数（可扩展）
 
     loop {
         if stop.load(Ordering::Relaxed) { break; }
-        match rx.recv() {
+        match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(hit) => {
                 found += 1;
                 generated_counter += 1;
@@ -258,9 +283,10 @@ fn aggregator(rx: Receiver<Hit>, args: &Args, stop: Arc<AtomicBool>, pat: &str) 
                         }
                     }
                 }
-                if let Some(limit) = args.limit { if found >= limit { stop.store(true, Ordering::Relaxed); break; } }
+                if let Some(limit) = eff_limit { if found >= limit { stop.store(true, Ordering::Relaxed); break; } }
             }
-            Err(_) => break,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {},
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
 
         if args.stats_interval > 0 {
