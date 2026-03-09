@@ -2,7 +2,7 @@ use std::{
     fs::{self, File},
     io::{Write},
     path::{Path, PathBuf},
-    sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}},
+    sync::{Arc, atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering}},
     thread,
     time::Duration,
 };
@@ -88,6 +88,7 @@ fn main() -> Result<()> {
     let threads = args.threads.unwrap_or_else(|| num_cpus::get());
     let stop = Arc::new(AtomicBool::new(false));
     let sig_count = Arc::new(AtomicUsize::new(0));
+    let total_attempts = Arc::new(AtomicU64::new(0));
 
     {
         let stop = Arc::clone(&stop);
@@ -122,7 +123,8 @@ fn main() -> Result<()> {
         let stop = Arc::clone(&stop);
         let case_insensitive = ci_eff;
         let print_only = args.print_only;
-        workers.push(thread::spawn(move || worker_loop(tx, stop, pattern, mode, case_insensitive, print_only)));
+        let total_attempts = Arc::clone(&total_attempts);
+        workers.push(thread::spawn(move || worker_loop(tx, stop, pattern, mode, case_insensitive, print_only, total_attempts)));
     }
 
     drop(tx);
@@ -132,7 +134,7 @@ fn main() -> Result<()> {
         Some(n) => Some(n),
         None => Some(10),
     };
-    aggregator(rx, &args, stop.clone(), &pat, eff_limit, ci_eff)?;
+    aggregator(rx, &args, stop.clone(), &pat, eff_limit, ci_eff, total_attempts)?;
 
     for h in workers { let _ = h.join(); }
     Ok(())
@@ -231,9 +233,11 @@ fn worker_loop(
     mode: Mode,
     case_insensitive: bool,
     print_only: bool,
+    total_attempts: Arc<AtomicU64>,
 ) {
     // 热路径循环：生成→派生→base58→匹配→命中发送
     while !stop.load(Ordering::Relaxed) {
+        total_attempts.fetch_add(1, Ordering::Relaxed);
         let sk = SigningKey::generate(&mut OsRng);
         let vk = sk.verifying_key();
         let mut kp_bytes = [0u8; 64];
@@ -267,17 +271,16 @@ fn ends_with(hay: &str, needle: &str, ci: bool) -> bool {
     if ci { hay.to_lowercase().ends_with(&needle) } else { hay.ends_with(needle) }
 }
 
-fn aggregator(rx: Receiver<Hit>, args: &Args, stop: Arc<AtomicBool>, pat: &str, eff_limit: Option<usize>, ci: bool) -> Result<()> {
+fn aggregator(rx: Receiver<Hit>, args: &Args, stop: Arc<AtomicBool>, pat: &str, eff_limit: Option<usize>, ci: bool, total_attempts: Arc<AtomicU64>) -> Result<()> {
     let mut found = 0usize;
     let mut last_stats = OffsetDateTime::now_utc();
-    let mut generated_counter: u64 = 0; // 简易估计：以命中作为可见事件，不统计总生成数（可扩展）
+    let mut last_attempts = 0u64;
 
     loop {
         if stop.load(Ordering::Relaxed) { break; }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(hit) => {
                 found += 1;
-                generated_counter += 1;
                 let out = if args.no_color { hit.peer_id_b58.clone() } else { highlight(&hit.peer_id_b58, pat, args.mode, ci) };
                 println!("{}", out);
                 if let Some(sk) = hit.sk_protobuf {
@@ -298,8 +301,12 @@ fn aggregator(rx: Receiver<Hit>, args: &Args, stop: Arc<AtomicBool>, pat: &str, 
             let now = OffsetDateTime::now_utc();
             let secs = (now - last_stats).whole_seconds();
             if secs >= args.stats_interval as i64 {
-                println!("[stats 统计 {}] hits/命中={}, threads/线程={}, mode/模式={:?}", now.format(&Rfc3339)?, found, args.threads.unwrap_or_else(num_cpus::get), args.mode);
+                let current_attempts = total_attempts.load(Ordering::Relaxed);
+                let attempts_diff = current_attempts - last_attempts;
+                let rate = if secs > 0 { attempts_diff as f64 / secs as f64 } else { 0.0 };
+                println!("[stats 统计 {}] hits/命中={}, processed/已处理={}, rate/效率={:.0}/s, threads/线程={}, mode/模式={:?}", now.format(&Rfc3339)?, found, current_attempts, rate, args.threads.unwrap_or_else(num_cpus::get), args.mode);
                 last_stats = now;
+                last_attempts = current_attempts;
             }
         }
     }
