@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use libp2p_identity::{Keypair, PeerId};
@@ -25,6 +25,9 @@ enum Mode {
     Prefix,
     Suffix,
 }
+
+const BASE58BTC_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const REQUIRED_PREFIX: &str = "12D3KooW";
 
 #[derive(Parser, Debug)]
 #[command(name = "KooForge", author, version, about = "IPFS/IPNS Peer ID pattern-matching (vanity) generator (Ed25519, high performance) · IPFS/IPNS Peer ID 模式匹配（个性化 Vanity）生成器（Ed25519，高性能）", long_about = None)]
@@ -82,8 +85,16 @@ struct Hit {
 
 fn main() -> Result<()> {
     let mut args = Args::parse();
-    if args.interactive || args.pattern.is_none() {
+    let used_guided_input = args.interactive || args.pattern.is_none();
+    if used_guided_input {
         args = interactive_args(args)?;
+    }
+    preprocess_args(&mut args)?;
+    if used_guided_input {
+        eprintln!(
+            "Equivalent command (guided input) · 引导输入对应的命令:\n{}",
+            build_equivalent_command(&args)
+        );
     }
     let threads = args.threads.unwrap_or_else(|| num_cpus::get());
     let stop = Arc::new(AtomicBool::new(false));
@@ -112,7 +123,7 @@ fn main() -> Result<()> {
     let (tx, rx) = bounded::<Hit>(1024);
 
     let pat = args.pattern.clone().expect("pattern required · 需要提供匹配子串");
-    let ci_eff = if args.case_sensitive { false } else { args.case_insensitive };
+    let ci_eff = effective_case_insensitive(&args);
     let pattern = if ci_eff { pat.to_lowercase() } else { pat.clone() };
 
     let mut workers = Vec::with_capacity(threads);
@@ -129,11 +140,7 @@ fn main() -> Result<()> {
 
     drop(tx);
 
-    let eff_limit = match args.limit {
-        Some(0) => None,
-        Some(n) => Some(n),
-        None => Some(10),
-    };
+    let eff_limit = resolve_effective_limit(args.limit);
     aggregator(rx, &args, stop.clone(), &pat, eff_limit, ci_eff, total_attempts)?;
 
     for h in workers { let _ = h.join(); }
@@ -147,6 +154,13 @@ fn interactive_args(mut base: Args) -> Result<Args> {
     let pattern: String = Input::with_theme(&theme)
         .with_prompt("Match substring (Base58) · 匹配子串 (Base58)")
         .allow_empty(false)
+        .validate_with(|input: &String| -> std::result::Result<(), String> {
+            let trimmed = input.trim();
+            if trimmed.is_empty() {
+                return Err("Pattern cannot be empty · 匹配子串不能为空".to_string());
+            }
+            validate_base58_pattern(trimmed).map_err(|e| e.to_string())
+        })
         .interact_text()?;
 
     let modes = ["any", "prefix", "suffix"];
@@ -167,9 +181,9 @@ fn interactive_args(mut base: Args) -> Result<Args> {
         .with_prompt("Hit limit (empty = default 10; 0 = unlimited) · 命中数量上限 (留空默认10；输入0为无限)")
         .allow_empty(true)
         .interact_text()?;
-    let limit = if limit_str.trim().is_empty() { Some(10) } else {
+    let limit = if limit_str.trim().is_empty() { None } else {
         let n: usize = limit_str.trim().parse()?;
-        if n == 0 { None } else { Some(n) }
+        Some(n)
     };
 
     let out_default = base.out.clone();
@@ -207,12 +221,13 @@ fn interactive_args(mut base: Args) -> Result<Args> {
         Some(s)
     } else { None };
 
-    base.pattern = Some(pattern);
+    base.pattern = Some(pattern.trim().to_string());
     base.mode = mode;
     base.threads = Some(threads);
     base.limit = limit;
     base.out = out;
     base.case_insensitive = case_insensitive;
+    base.case_sensitive = !case_insensitive;
     base.print_only = print_only;
     base.stats_interval = stats_interval;
     base.export_ipfs = export_ipfs;
@@ -224,6 +239,155 @@ fn interactive_args(mut base: Args) -> Result<Args> {
     base.no_color = !use_color;
     base.interactive = false;
     Ok(base)
+}
+
+fn preprocess_args(args: &mut Args) -> Result<()> {
+    let raw = args.pattern.clone().context("pattern required · 需要提供匹配子串")?;
+    let mut pattern = raw.trim().to_string();
+    if pattern.is_empty() {
+        bail!("Pattern cannot be empty · 匹配子串不能为空");
+    }
+    validate_base58_pattern(&pattern)?;
+
+    if matches!(args.mode, Mode::Prefix) {
+        let normalized = normalize_prefix_pattern(&pattern);
+        if normalized != pattern {
+            eprintln!(
+                "Prefix mode requires pattern to start with {REQUIRED_PREFIX}; auto-completed · 前缀匹配要求以 {REQUIRED_PREFIX} 开头，已自动补齐: '{pattern}' -> '{normalized}'"
+            );
+            pattern = normalized;
+        }
+    }
+
+    args.pattern = Some(pattern);
+    Ok(())
+}
+
+fn validate_base58_pattern(pattern: &str) -> Result<()> {
+    let mut invalid = Vec::new();
+    for ch in pattern.chars() {
+        if !BASE58BTC_ALPHABET.contains(ch) && !invalid.contains(&ch) {
+            invalid.push(ch);
+        }
+    }
+    if invalid.is_empty() {
+        return Ok(());
+    }
+
+    let invalid_list = invalid
+        .iter()
+        .map(|c| format!("'{}'", c))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut hints = Vec::new();
+    if invalid.contains(&'0') {
+        hints.push("`0` (zero) is excluded; use `o` or `O` only when intended · `0`（数字零）不在 Base58 中");
+    }
+    if invalid.contains(&'O') {
+        hints.push("`O` (capital o) is excluded to avoid confusion with `0` · `O`（大写字母 O）不在 Base58 中");
+    }
+    if invalid.contains(&'I') {
+        hints.push("`I` (capital i) is excluded to avoid confusion with `1`/`l` · `I`（大写字母 I）不在 Base58 中");
+    }
+    if invalid.contains(&'l') {
+        hints.push("`l` (lowercase L) is excluded to avoid confusion with `1`/`I` · `l`（小写字母 l）不在 Base58 中");
+    }
+    if hints.is_empty() {
+        hints.push("Use only Base58btc characters: 123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz · 仅可使用 Base58btc 字符集");
+    }
+
+    bail!(
+        "Invalid Base58 pattern: illegal character(s) {invalid_list} · Base58 模式非法字符: {invalid_list}\n{}",
+        hints.join("\n")
+    );
+}
+
+fn normalize_prefix_pattern(pattern: &str) -> String {
+    if pattern.starts_with(REQUIRED_PREFIX) {
+        return pattern.to_string();
+    }
+
+    let required_lower = REQUIRED_PREFIX.to_ascii_lowercase();
+    let pattern_lower = pattern.to_ascii_lowercase();
+
+    if pattern_lower.starts_with(&required_lower) && pattern.len() >= REQUIRED_PREFIX.len() {
+        let suffix = &pattern[REQUIRED_PREFIX.len()..];
+        return format!("{REQUIRED_PREFIX}{suffix}");
+    }
+
+    if required_lower.starts_with(&pattern_lower) {
+        return REQUIRED_PREFIX.to_string();
+    }
+
+    format!("{REQUIRED_PREFIX}{pattern}")
+}
+
+fn resolve_effective_limit(limit: Option<usize>) -> Option<usize> {
+    match limit {
+        None => Some(10),
+        Some(0) => None,
+        Some(n) => Some(n),
+    }
+}
+
+fn effective_case_insensitive(args: &Args) -> bool {
+    if args.case_sensitive {
+        false
+    } else {
+        args.case_insensitive
+    }
+}
+
+fn mode_as_str(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Any => "any",
+        Mode::Prefix => "prefix",
+        Mode::Suffix => "suffix",
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' )) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
+fn build_equivalent_command(args: &Args) -> String {
+    let mut parts = Vec::new();
+    parts.push("kooforge".to_string());
+    let pattern = args.pattern.as_ref().expect("pattern required for command preview");
+    parts.push(shell_quote(pattern));
+    parts.push(format!("--mode {}", mode_as_str(args.mode)));
+    parts.push(format!("--threads {}", args.threads.unwrap_or_else(num_cpus::get)));
+    match resolve_effective_limit(args.limit) {
+        Some(n) => parts.push(format!("--limit {n}")),
+        None => parts.push("--limit 0".to_string()),
+    }
+    parts.push(format!("--out {}", shell_quote(&args.out.display().to_string())));
+    if effective_case_insensitive(args) {
+        parts.push("--case-insensitive".to_string());
+    } else {
+        parts.push("--case-sensitive".to_string());
+    }
+    if args.print_only {
+        parts.push("--print-only".to_string());
+    }
+    parts.push(format!("--stats-interval {}", args.stats_interval));
+    if args.export_ipfs {
+        parts.push("--export-ipfs".to_string());
+        if let Some(name) = &args.key_name {
+            parts.push(format!("--key-name {}", shell_quote(name)));
+        }
+    }
+    if args.no_color {
+        parts.push("--no-color".to_string());
+    }
+    parts.join(" ")
 }
 
 fn worker_loop(
@@ -386,5 +550,75 @@ fn highlight(hay: &str, needle: &str, mode: Mode, ci: bool) -> String {
         format!("{}{}{}{}{}", pre, esc_on, mid, esc_off, post)
     } else {
         hay.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base58_accepts_valid_characters() {
+        let all = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        assert!(validate_base58_pattern(all).is_ok());
+    }
+
+    #[test]
+    fn base58_rejects_confusing_characters() {
+        for ch in ['0', 'O', 'I', 'l'] {
+            let err = validate_base58_pattern(&format!("A{ch}B")).unwrap_err().to_string();
+            assert!(err.contains(&format!("'{ch}'")));
+        }
+    }
+
+    #[test]
+    fn prefix_normalization_keeps_valid_pattern() {
+        assert_eq!(normalize_prefix_pattern("12D3KooWabc"), "12D3KooWabc");
+    }
+
+    #[test]
+    fn prefix_normalization_completes_partial_prefix() {
+        assert_eq!(normalize_prefix_pattern("12D3"), "12D3KooW");
+    }
+
+    #[test]
+    fn prefix_normalization_prepends_missing_prefix() {
+        assert_eq!(normalize_prefix_pattern("abc"), "12D3KooWabc");
+    }
+
+    #[test]
+    fn prefix_normalization_canonicalizes_prefix_case() {
+        assert_eq!(normalize_prefix_pattern("12d3koowX"), "12D3KooWX");
+    }
+
+    #[test]
+    fn resolve_limit_semantics() {
+        assert_eq!(resolve_effective_limit(None), Some(10));
+        assert_eq!(resolve_effective_limit(Some(0)), None);
+        assert_eq!(resolve_effective_limit(Some(5)), Some(5));
+    }
+
+    #[test]
+    fn build_command_prints_unlimited_as_zero() {
+        let args = Args {
+            pattern: Some("12D3KooWabc".to_string()),
+            mode: Mode::Prefix,
+            threads: Some(8),
+            limit: Some(0),
+            out: PathBuf::from("keystore dir"),
+            case_insensitive: false,
+            case_sensitive: true,
+            print_only: true,
+            stats_interval: 1,
+            key_name: Some("dupa key".to_string()),
+            export_ipfs: true,
+            interactive: false,
+            no_color: true,
+        };
+        let cmd = build_equivalent_command(&args);
+        assert!(cmd.contains("kooforge 12D3KooWabc"));
+        assert!(cmd.contains("--limit 0"));
+        assert!(cmd.contains("--case-sensitive"));
+        assert!(cmd.contains("--key-name 'dupa key'"));
     }
 }
