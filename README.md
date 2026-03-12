@@ -49,11 +49,12 @@ ipfs name publish --key=dupa {ipfs-path}
 - `--case-insensitive`: case-insensitive matching (default on).
 - `--case-sensitive`: force case-sensitive matching (overrides above).
 - `--print-only`: print PeerId only; do not write the private key.
-- `--stats-interval SECS`: stats print interval in seconds; `0` disables.
+- `--stats-interval SECS`: stats print interval in seconds; `0` disables. Default is `2`, or `1` when `--extreme` is used and this option is omitted.
 - `--export-ipfs`: also write a go-ipfs compatible keystore file using `--key-name`.
 - `--key-name NAME`: filename for the keystore export.
 - `--no-color`: disable match highlighting.
 - `--interactive`: interactive parameter prompts.
+- `--extreme`: extreme performance mode. Forces case-sensitive matching and defaults stats interval to `1` if not set explicitly.
 
 ## Output & Compatibility
 - On match, writes the private key to `./keystore/` named by the `PeerId`; encoded using libp2p protobuf.

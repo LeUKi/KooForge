@@ -49,11 +49,12 @@ ipfs name publish --key=dupa {ipfs-path}
 - `--case-insensitive`：大小写不敏感匹配（默认开启）。
 - `--case-sensitive`：强制大小写敏感匹配（覆盖上述设置）。
 - `--print-only`：只打印 PeerId，不写入私钥文件。
-- `--stats-interval SECS`：统计打印间隔（秒；`0` 关闭）。
+- `--stats-interval SECS`：统计打印间隔（秒；`0` 关闭）。默认 `2`，若启用 `--extreme` 且未显式设置则默认为 `1`。
 - `--export-ipfs`：使用 `--key-name` 额外落盘兼容 go-ipfs keystore。
 - `--key-name NAME`：导出到 keystore 的文件名。
 - `--no-color`：关闭命中高亮显示。
 - `--interactive`：进入交互界面引导输入参数。
+- `--extreme`：极致性能模式。会强制使用大小写敏感匹配；若未显式设置统计间隔，默认每秒输出统计（`1`）。
 
 ## 输出与兼容性
 - 默认将命中的私钥写入 `./keystore/`，文件名为该 `PeerId`；内容为 libp2p 私钥 protobuf 编码。
